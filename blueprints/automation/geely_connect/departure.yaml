@@ -1,0 +1,59 @@
+blueprint:
+  name: Geely Connect - Pre-condition for a one-off departure
+  description: >-
+    Warm or cool the car before a single trip you set in advance, rather than on
+    a weekly pattern. Point it at an input_datetime helper that holds a date AND
+    a time: the climate starts the chosen number of minutes before it, once, and
+    nothing happens again until you set a new departure. For a recurring
+    commute, use "Pre-condition climate before departure" instead.
+  domain: automation
+  input:
+    climate_entity:
+      name: Climate entity
+      selector:
+        entity: { domain: climate }
+    departure_datetime:
+      name: Departure (date and time helper)
+      description: >-
+        An input_datetime helper with both a date and a time. Settings >
+        Devices & services > Helpers > Create helper > Date and/or time.
+      selector:
+        entity: { domain: input_datetime }
+    lead_minutes:
+      name: Start this many minutes before departure
+      default: 15
+      selector:
+        number: { min: 1, max: 120, step: 1, unit_of_measurement: "min" }
+    target_temp:
+      name: Target temperature (°C)
+      default: 22
+      selector:
+        number: { min: 15.5, max: 28.5, step: 0.5, unit_of_measurement: "°C" }
+variables:
+  departure_entity: !input departure_datetime
+  lead: !input lead_minutes
+trigger:
+  # The helper's `timestamp` attribute rather than its state, deliberately: the
+  # state is a naive local string, and subtracting it from now() - which is
+  # timezone-aware - raises inside the template on every evaluation. The
+  # attribute is a plain epoch second, so the comparison is arithmetic.
+  #
+  # A template carrying now() is re-rendered every minute, which is the whole
+  # mechanism here: the window opens `lead` minutes before departure and closes
+  # at departure, so this goes true once and the automation runs once. A
+  # time-only helper reports seconds since midnight instead of an epoch, which
+  # can never land inside that window - so the wrong kind of helper does
+  # nothing rather than firing at the wrong moment.
+  - platform: template
+    value_template: >-
+      {% set ts = state_attr(departure_entity, 'timestamp') %}
+      {{ ts is not none and 0 <= (ts - as_timestamp(now())) <= lead * 60 }}
+action:
+  # One command, for the reason spelled out in the recurring blueprint: the car
+  # executes one remote command at a time and rejects - does not queue - the
+  # next one with "the last request has not yet been executed" (#19).
+  # set_temperature already switches the climate on.
+  - service: climate.set_temperature
+    target: { entity_id: !input climate_entity }
+    data: { temperature: !input target_temp }
+mode: single

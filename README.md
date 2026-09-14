@@ -685,7 +685,8 @@ Other smart behaviour: **long-term statistics** (battery, range, consumption,
 pressures feed HA statistics + the Energy dashboard) and **ready-made
 Blueprints** in `blueprints/` (charging complete, a live lock-screen charging
 countdown, low battery, door/trunk left open, tire pressure out of range, left
-unlocked away from home, pre-condition climate before departure).
+unlocked away from home, pre-condition climate before departure - weekly, or
+for a single trip you set the night before).
 
 ---
 
