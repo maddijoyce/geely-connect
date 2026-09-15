@@ -202,3 +202,98 @@ def test_parse_is_pure():
     before = copy.deepcopy(items)
     cap.parse(items)
     assert items == before
+
+
+# ------------------------------------------------- the 1.0 charge scheme ---
+#
+# Rows copied from two real E2 catalogues (#72) - a South African and a
+# Colombian car, 31 entries each, not one of them a `_2` row. The functionIds
+# and params are the vendor's own spellings, so a rename on their side would
+# fail here rather than silently.
+
+def _e2_remote_charge_1():
+    return _entry("remote_charge_1", True,
+                  valueEnum="remote_charge_1_chargestart",
+                  functionCategory="remote_control",
+                  paramsJson=[{"nameKey": "remote_charge_1_chargestarttime",
+                               "name": "预约充电",
+                               "config": "remote_charge_1_chargestart"}])
+
+
+def _e2_remote_appointment_charging():
+    return _entry("remote_appointment_charging", True,
+                  valueEnum="booking_travel_1_batteryheating",
+                  functionCategory="remote_control",
+                  paramsJson=[{"nameKey": "booking_travel_1_AC",
+                               "name": "乘员舱空调", "config": "booking_travel_1_AC"},
+                              {"nameKey": "booking_travel_1_batteryheating",
+                               "name": "动力电池预热",
+                               "config": "booking_travel_1_batteryheating"},
+                              {"nameKey": "remote_charge_1_chargestarttime",
+                               "name": "预约充电",
+                               "config": "remote_charge_1_chargestart"}])
+
+
+def _ex5_remote_charge_2():
+    return _entry("remote_charge_2", True,
+                  valueEnum="end_charge_switch,start_charge_switch",
+                  paramsJson=[{"nameKey": "battery_type", "name": "电池类型",
+                               "config": "Li_iron_phosphate_battery"},
+                              {"nameKey": "charging_switch", "name": "充电开关",
+                               "config": "end_charge_switch,start_charge_switch"}])
+
+
+def test_a_catalogue_that_declares_only_the_1_0_charge_entry_says_no_switch():
+    """The E2 shape: `remote_charge_1` (a start time, not a switch) and the 1.0
+    scheduled-charging params, no `_2` row. The owner confirmed the app has no
+    start/stop and that both switches here did nothing - so both read False,
+    explicitly, which is what switch.py and time.py need to skip them."""
+    out = cap.parse([_e2_remote_charge_1(), _e2_remote_appointment_charging(),
+                     _entry("honk_flash", True), _entry("door_lock_switch_control", True)])
+    assert out["charging.enabled"] is False
+    assert out["scheduled_charging.enabled"] is False
+    # And the rest of the car is untouched by the rule.
+    assert out["find_car.enabled"] is True and out["lock.enabled"] is True
+
+
+def test_the_1_0_rule_fires_on_a_declared_row_even_when_it_is_disabled():
+    """Declared is the marker, not enabled: a disabled 1.0 charge row is still a
+    car that speaks the 1.0 scheme, and either way there is no switch."""
+    out = cap.parse([_entry("remote_charge_1", False,
+                            paramsJson=[{"nameKey": "remote_charge_1_chargestarttime",
+                                         "config": "remote_charge_1_chargestart"}]),
+                     _entry("remote_appointment_charging", False,
+                            paramsJson=[{"nameKey": "remote_charge_1_chargestarttime",
+                                         "config": "remote_charge_1_chargestart"}])])
+    assert out["charging.enabled"] is False
+    assert out["scheduled_charging.enabled"] is False
+
+
+def test_the_2_0_rows_win_when_a_catalogue_carries_both_schemes():
+    """An EX5 declares `remote_charge_2`, a bare `remote_appointment_charging`
+    and `apt_charging_single_cycle_G2` side by side - and it is the car the
+    slot-6 write was verified on. A car that lists both schemes keeps its
+    switches."""
+    out = cap.parse([_ex5_remote_charge_2(), _e2_remote_charge_1(),
+                     _entry("remote_appointment_charging", True),
+                     _entry("apt_charging_single_cycle_G2", True),
+                     _e2_remote_appointment_charging()])
+    assert out["charging.enabled"] is True
+    assert out["scheduled_charging.enabled"] is True
+
+
+def test_a_catalogue_that_names_neither_charge_scheme_stays_permissive():
+    """Absence alone is not evidence (#63): a catalogue with no charge row at
+    all, or a bare `remote_appointment_charging` with no params, reads exactly
+    as it did before this rule existed."""
+    out = cap.parse([_entry("honk_flash", True)])
+    assert "charging.enabled" not in out
+    assert "scheduled_charging.enabled" not in out
+    out = cap.parse([_entry("remote_appointment_charging", True)])
+    assert "charging.enabled" not in out
+    assert out["scheduled_charging.enabled"] is True
+
+
+def test_the_g2_row_alone_keeps_scheduled_charging_on():
+    out = cap.parse([_entry("apt_charging_single_cycle_G2", True)])
+    assert out["scheduled_charging.enabled"] is True

@@ -63,7 +63,9 @@ def _targets(entry: dict) -> set[str]:
 def parse(items: list[dict]) -> dict[str, Any]:
     """Return a flat capability summary derived from the raw catalog list.
 
-    Keys produced (all optional - missing means "not advertised"):
+    Keys produced (all optional - missing means "not advertised"; an explicit
+    False means the catalogue declared the 1.0 scheme of a feature whose
+    entity here speaks the 2.0 one, see charging below):
       ac.enabled, ac.min, ac.max, ac.step
       seat.heat.enabled, seat.heat.positions (list of seat names)
       seat.vent.enabled, seat.vent.positions
@@ -202,11 +204,44 @@ def parse(items: list[dict]) -> dict[str, Any]:
         out["windows.enabled"] = True
     if enabled("remote_control_ventilate_2"):
         out["window_vent.enabled"] = True
+    # Charging start/stop, and the one place this parser says "no" from a
+    # catalogue that names a feature rather than from one that omits it.
+    #
+    # An EX5 declares `remote_charge_2` with `charging_switch:
+    # end_charge_switch,start_charge_switch` - a switch, which is what the
+    # Charging entity sends (RCS start/stop). A South African E2 and a
+    # Colombian one (#72) declare the 1.0 scheme instead: `remote_charge_1`,
+    # whose only enum is `remote_charge_1_chargestart` with a
+    # `remote_charge_1_chargestarttime` param - a start *time*, not a switch -
+    # and no `_2` row anywhere in their 31 entries. The owner confirmed the
+    # official app offers no start/stop on that car, and pressing the switch
+    # here did nothing. So a catalogue that spells out the 1.0 charge entry and
+    # not the 2.0 one is read as "no switch", while a catalogue that names
+    # neither stays permissive exactly as before - absence alone is not
+    # evidence (#63), a present 1.0 declaration is.
     if enabled("remote_charge_2"):
         out["charging.enabled"] = True
+    elif "remote_charge_1" in by_id:
+        out["charging.enabled"] = False
     if enabled("parking_comfortable_2"):
         out["parking_comfort.enabled"] = True
-    if enabled("remote_appointment_charging") or enabled("apt_charging_single_cycle_G2"):
+    # Scheduled charging, by the same rule. The switch and the two time
+    # entities write charge-server slot 6 with the rbc* body, which is
+    # `apt_charging_single_cycle_G2` (GEEA 2.0, startTime/endTime/Cycle). The
+    # same two E2s carry `remote_appointment_charging` with the 1.0 params
+    # (`booking_travel_1_*`, `remote_charge_1_chargestarttime`) and no G2 row;
+    # on both, slot 6 answers the generic empty envelope, and the 23:00-07:00
+    # schedule one owner set in the app sits in slot 2 in a different shape
+    # (scheduleList / timerActivation / day). He reported the switch here had
+    # no effect - it was writing a slot his car does not use. A bare
+    # `remote_appointment_charging` with no params, which is how an EX5
+    # declares it beside the G2 row, keeps the permissive reading.
+    apt = by_id.get("remote_appointment_charging") or {}
+    if enabled("apt_charging_single_cycle_G2"):
+        out["scheduled_charging.enabled"] = True
+    elif "remote_charge_1_chargestarttime" in _params_to_dict(apt):
+        out["scheduled_charging.enabled"] = False
+    elif enabled("remote_appointment_charging"):
         out["scheduled_charging.enabled"] = True
 
     return out

@@ -756,6 +756,40 @@ def test_hhmm_parse_and_format():
     assert t._fmt_hhmm(dtime(23, 59)) == "23:59"
 
 
+def test_an_e2_catalogue_ends_up_with_no_charging_controls_at_all():
+    """The chain, end to end: the 1.0-scheme rows two real E2s declare (#72)
+    go through capabilities.parse and out the other side neither the Charging
+    switch, the Scheduled Charging switch nor the two time entities exist -
+    the three controls the owner reported pressing to no effect."""
+    if not have_homeassistant():
+        skip("homeassistant not installed")
+    cap = load("capabilities")
+    sw = load("switch")
+    t = load("time")
+    caps = cap.parse([
+        {"functionId": "remote_charge_1", "valueEnable": True,
+         "valueEnum": "remote_charge_1_chargestart",
+         "paramsJson": [{"nameKey": "remote_charge_1_chargestarttime",
+                         "config": "remote_charge_1_chargestart"}]},
+        {"functionId": "remote_appointment_charging", "valueEnable": True,
+         "paramsJson": [{"nameKey": "booking_travel_1_AC", "config": "booking_travel_1_AC"},
+                        {"nameKey": "remote_charge_1_chargestarttime",
+                         "config": "remote_charge_1_chargestart"}]},
+        {"functionId": "honk_flash", "valueEnable": True},
+    ])
+    hass, b = _bundle(_status(), caps=caps)
+    got = []
+    asyncio.run(sw.async_setup_entry(hass, _Entry(), lambda e, *a, **k: got.extend(e)))
+    names = sorted(type(e).__name__ for e in got)
+    assert "GeelyScheduledChargingSwitch" not in names, names
+    assert f"geely_{FAKE_VIN}_sw_charging" not in [e._attr_unique_id for e in got], got
+    # The other table-driven switch survives, so the rule cut only charging.
+    assert f"geely_{FAKE_VIN}_sw_parking_comfort" in [e._attr_unique_id for e in got], got
+    got = []
+    asyncio.run(t.async_setup_entry(hass, _Entry(), lambda e, *a, **k: got.extend(e)))
+    assert got == [], got
+
+
 def test_time_entities_skip_only_when_both_capability_flags_deny():
     if not have_homeassistant():
         skip("homeassistant not installed")
