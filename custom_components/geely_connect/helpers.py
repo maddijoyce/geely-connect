@@ -355,3 +355,19 @@ def exterior_temp_is_stale(climate: dict | None) -> bool:
         return False
     flag = climate.get("exteriorTempValidity")
     return flag is not None and str(flag).strip().lower() in ("false", "0")
+
+
+def sunroof_is_stale(climate: dict | None) -> bool:
+    """Is `sunroofOpenStatus` a reading the car disowns?
+
+    `sunroofOpenStatusValidity` is the third flag of this family. Two E2s with
+    no sunroof (#72) send `sunroofOpenStatus: 1` beside the flag reading
+    false - so the cover read "Closed" on a roof the car does not have - while
+    an EX5 that has one sends the status with no flag at all. Same contract as
+    the two above: only an EXPLICIT falsy value counts, so a car that never
+    reports the flag is untouched.
+    """
+    if not isinstance(climate, dict):
+        return False
+    flag = climate.get("sunroofOpenStatusValidity")
+    return flag is not None and str(flag).strip().lower() in ("false", "0")

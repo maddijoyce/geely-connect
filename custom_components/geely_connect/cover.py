@@ -43,7 +43,10 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api import GeelyControlError, redact
 from .const import DOMAIN, SERVICE_WINDOW
-from .helpers import walk as _walk, windows_open, windows_position, schedule_refresh
+from .helpers import (
+    walk as _walk, windows_open, windows_position, schedule_refresh,
+    sunroof_is_stale,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -131,6 +134,11 @@ class GeelySunroof(_BaseGeelyCover):
     @property
     def is_closed(self) -> bool | None:
         climate = _walk(self.coordinator.data or {}, _CLIMATE_PATH) or {}
+        # A car that disowns the field - `sunroofOpenStatusValidity` false,
+        # which is how an E2 with no roof reports it - reads unknown rather
+        # than closed. See helpers.sunroof_is_stale.
+        if sunroof_is_stale(climate):
+            return None
         # sunroofOpenStatus: "1" = closed, "2" = open (mirrors curtain
         # convention)
         v = climate.get("sunroofOpenStatus")

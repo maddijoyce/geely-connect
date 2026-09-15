@@ -560,6 +560,36 @@ def test_sunroof_maps_1_closed_2_open_and_tolerates_junk():
     assert entity.is_closed is None, "sunroof answered from the curtain field"
 
 
+def test_sunroof_reads_unknown_when_the_car_disowns_the_field():
+    """Two E2s with no sunroof (#72) send `sunroofOpenStatus: 1` beside
+    `sunroofOpenStatusValidity: false`, and the cover read Closed on a roof
+    the car does not have. Only an explicit false blanks it: an EX5 that has
+    a roof sends no flag at all and must keep reading."""
+    _need_ha()
+    for flag in ("false", False, "0", 0, " False "):
+        _, entity = _make_cover("GeelySunroof", data=_climate_data(
+            sunroofOpenStatus="1", sunroofOpenStatusValidity=flag))
+        assert entity.is_closed is None, flag
+    for flag in ("true", True, "1", 1):
+        _, entity = _make_cover("GeelySunroof", data=_climate_data(
+            sunroofOpenStatus="1", sunroofOpenStatusValidity=flag))
+        assert entity.is_closed is True, flag
+    # No flag at all - the EX5 shape - is untouched.
+    _, entity = _make_cover("GeelySunroof", data=_climate_data(sunroofOpenStatus="2"))
+    assert entity.is_closed is False
+    # The sunshade does not borrow the roof's flag.
+    _, entity = _make_cover("GeelySunshade", data=_climate_data(
+        curtainOpenStatus="1", sunroofOpenStatusValidity="false"))
+    assert entity.is_closed is True
+
+
+def test_sunroof_is_stale_tolerates_a_non_dict():
+    helpers = load("helpers")
+    assert helpers.sunroof_is_stale(None) is False
+    assert helpers.sunroof_is_stale("not a dict") is False
+    assert helpers.sunroof_is_stale({}) is False
+
+
 def test_windows_cover_follows_the_four_corner_fields():
     _need_ha()
     closed = dict(winStatusDriver="2", winStatusPassenger="2",
