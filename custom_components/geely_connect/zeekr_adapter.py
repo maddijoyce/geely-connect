@@ -397,13 +397,43 @@ class ZeekrAdapter:
              "setting": {"serviceParameters": [{"key": "pai", "value": "1"}]}}
 
         The gateway ACKs immediately; the fresh fix lands in the status payload
-        a few seconds later, which the next poll reads. On a vehicle without an
-        x-vin token this stays a no-op, exactly as before.
+        a few seconds later, which the next poll reads.
+
+        A vehicle WITHOUT an x-vin token is not a vehicle without a position.
+        It is a new-platform account whose car is still read over the old
+        backend, and every other call on that path already falls back to the
+        legacy route - control() does exactly that thirty lines below, sending
+        the telematics body over the same HF session. This one did not: it
+        returned `{}`. No request, no exception, no log line. The car was
+        therefore never asked for a fix, the cloud kept serving the last one it
+        had, and the map froze while every other value stayed live - including
+        under Refresh Data, which fires this and then reads a position nothing
+        had asked the car to update.
+
+        So fall back to the legacy PAI, byte-for-byte the body api.py sends on
+        the old platform. `latest: true` and the `operation=4` parameter are
+        included deliberately: they are what the OLD route was captured
+        wanting, and it is only the new gateway that rejects operation=4 with
+        037000.
         """
         if self._client.enc_vin:
             return self._authed(self._client.control_new_resp, "PAI", "start",
                                 [{"key": "pai", "value": "1"}])
-        return {}
+        body = {
+            "command": "start",
+            "creator": "tc",
+            "latest": True,
+            "serviceId": "PAI",
+            "serviceParameters": [
+                {"key": "operation", "value": "4"},
+                {"key": "pai", "value": "1"},
+            ],
+            "timestamp": str(int(time.time() * 1000)),
+            "userId": str(self.user_id),
+        }
+        _LOGGER.debug("position wake -> LEGACY route PUT /remote-control/"
+                      "vehicle/telematics/<vin> (no x-vin set)")
+        return self._authed(self._client.control_resp, self.vin, body)
 
     def vehicle_status_state(self) -> dict:
         raise NotImplementedError(

@@ -50,6 +50,7 @@ import hashlib
 import hmac
 import http.client
 import json
+import logging
 import random
 import ssl
 import string
@@ -60,6 +61,8 @@ from typing import Any
 from urllib.parse import urlparse, parse_qsl, quote
 
 from .api import redact
+
+_LOGGER = logging.getLogger(__name__)
 
 # Public protocol identity, embedded in the shipped app APK and extractable
 # by anyone - the same pattern as the legacy integration's per-region app
@@ -672,6 +675,10 @@ class ZeekrClient:
         # Opaque per-vehicle token the new gateway wants in `x-vin`; see
         # CONF_ZEEKR_ENC_VIN. Empty = new-platform vehicle calls unused.
         self.enc_vin: str = ""
+        # Cleared for good if this gateway ever rejects the position-freshness
+        # flags on the status read (see vehicle_status_resp). Sticky so the
+        # probe costs one extra request in a session, not one per poll.
+        self._status_flags: bool = True
 
     # ---- transport ----------------------------------------------------------
 
@@ -846,16 +853,47 @@ class ZeekrClient:
 
     def vehicle_status_resp(self, vin: str, user_id: str | None = None) -> dict:
         """Full BaseResult envelope for the old-platform status endpoint
-        (remote-control/vehicle/status/{vin}?userId=...) with the HF JWT.
-        Same endpoint family the legacy integration uses, so the existing
-        coordinator parsing applies unchanged."""
+        (remote-control/vehicle/status/{vin}?userId=...&latest=&target=) with
+        the HF JWT. Same endpoint family the legacy integration uses, so the
+        existing coordinator parsing applies unchanged.
+
+        The empty `latest=` and `target=` flags are not decoration. GeelyApi's
+        own vehicle_status sends them on this same route, and says why
+        (AVD-Frida confirmed): without them "the gateway serves an older
+        cached snapshot for the position field". This path omitted them, so a
+        new-platform car read here got a live payload with a dead position -
+        every other value fresh, the map frozen - and the PAI wake it pairs
+        with could not be observed no matter how often it fired.
+
+        The flags are dropped permanently if this gateway rejects them, and
+        the downgrade is deliberately shaped so only the FLAGS can trigger it:
+        the unflagged retry has to succeed before the flag is cleared. A dead
+        HF JWT fails both forms, raises from the retry, and leaves the flags
+        armed - otherwise one auth blip would silently cost every later poll
+        its fresh position, which is the bug this method is fixing.
+        """
         if not self.hf_token:
             raise ZeekrAuthError("not logged in (no HF session)")
-        return _hf_request(
-            "GET", f"/remote-control/vehicle/status/{vin}",
-            query=f"userId={user_id or self.user_id or ''}",
-            token=self.hf_token, vin=vin, vehicle_model=self.vehicle_model,
-            timezone=self.timezone, device_identifier=self.hf_device_id)
+        uid = user_id or self.user_id or ""
+
+        def _read(query: str) -> dict:
+            return _hf_request(
+                "GET", f"/remote-control/vehicle/status/{vin}", query=query,
+                token=self.hf_token, vin=vin, vehicle_model=self.vehicle_model,
+                timezone=self.timezone, device_identifier=self.hf_device_id)
+
+        if not self._status_flags:
+            return _read(f"userId={uid}")
+        try:
+            return _read(f"userId={uid}&latest=&target=")
+        except ZeekrApiError as err:
+            resp = _read(f"userId={uid}")     # raises too if the flags were innocent
+            self._status_flags = False
+            _LOGGER.warning(
+                "status read: this gateway rejected the position-freshness "
+                "flags (%s); dropping them for this session - the map may lag "
+                "behind the rest of the data", err)
+            return resp
 
     def vehicle_status(self, vin: str, user_id: str | None = None) -> dict:
         """The data block only (legacy-style convenience for callers that

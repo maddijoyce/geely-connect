@@ -162,6 +162,20 @@ POLL_PROFILES: dict[str, dict] = {
     "manual": {"base": 0, "fast": 0, "cap": 0, "secondary_every": 1,
                "position_every": 1, "manual": True},
 }
+# How long Refresh Data waits before reading the car a second time.
+#
+# The press fires the PAI position wake, and the gateway ACKs that in
+# milliseconds - but the ACK only means "the car has been asked". The fix
+# itself is uploaded seconds later, so the status read in the same cycle is
+# necessarily one step behind the wake it just sent, and a single press could
+# never move the map. The follow-up read is what collects it.
+#
+# 15s is a compromise, not a measurement: long enough for a tbox with a warm
+# fix, short enough that the button still feels like it did something. A cold
+# GPS lock can outrun it, and that is fine - the next ordinary poll carries
+# the fix, and this never leaves the map worse than it was.
+POSITION_SETTLE_SECONDS = 15
+
 POLL_MODES: dict[str, str] = {
     "super_eco": "🌙 Super Eco (rarely polls; Refresh Data any time)",
     "eco":    "🔋 Eco (fewest interruptions)",

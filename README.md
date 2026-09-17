@@ -611,6 +611,12 @@ long it sits. (A car whose odometer cannot be read keeps the old per-cycle
 cadence, and **Refresh Data** forces a fix in any mode - which is also the
 answer for a car that is towed rather than driven.)
 
+A press of **Refresh Data** reads the car twice: once immediately, and once a
+few seconds later. The wake asks the car for a fix and the gateway acknowledges
+that at once, but the fix itself is uploaded a moment afterwards - so the first
+read is always one step behind the wake that produced it, and without the
+second read a single press could never move the map.
+
 The mode is **not fixed at setup** - change it any time from **Configure** on
 the device page (see *Changing settings later* below).
 
@@ -1015,6 +1021,15 @@ mapping waits for a second owner's confirmation, because a wrong guess there
 could unlock a car; until then those two buttons answer with a clear "not
 mapped" error rather than sending anything. Non-AU regions are still
 unverified.
+
+**Two kinds of new-platform account.** Signing in always happens on the new
+gateway, but where the *vehicle* is read depends on the car. Most new-app
+accounts still read their car on the old backend over the HF session - that is
+the captured design, and status, capability and vehicle-list all go there. Only
+a car the old backend has stopped knowing needs the `x-vin` route below. Both
+kinds get the GPS position wake; it used to be sent only on the `x-vin` route,
+which left the first kind with a live dashboard and a map frozen on the last
+fix the cloud happened to hold.
 
 **Migrated accounts.** When the official app moves an account onto the new
 platform, the old backend stops knowing the car - every read answers

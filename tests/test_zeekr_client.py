@@ -911,3 +911,109 @@ def test_vehicle_record_helpers_tail_branches():
     assert zc.vehicle_vin({"vin": ""}) is None
     assert zc.vehicle_nickname({}) == ""
     assert zc.vehicle_nickname({"nickname": 0}) == ""
+
+
+# --- the position-freshness flags on the old-platform status read ------------
+#
+# GeelyApi sends `&latest=&target=` on this same route and documents why
+# (AVD-Frida): without them the gateway serves a cached snapshot for the
+# POSITION field specifically. This path omitted them, so a new-platform car
+# read here got live data with a dead map.
+
+def _capture_hf(responses):
+    """Swap zc._hf_request for a recorder. `responses` is one entry per call:
+    a dict to return, or an exception to raise."""
+    seen = []
+
+    def _fake(method, path, *, query="", **kw):
+        seen.append({"method": method, "path": path, "query": query})
+        out = responses[min(len(seen) - 1, len(responses) - 1)]
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+    return seen, _fake
+
+
+def _status_client(fake):
+    c = zc.ZeekrClient("user@example.com", "pw", gateway="https://unused.invalid")
+    c.hf_token = "mock-hf"
+    c.user_id = "mock-uid"
+    zc._hf_request = fake
+    return c
+
+
+def test_the_status_read_asks_for_the_freshest_position():
+    orig = zc._hf_request
+    seen, fake = _capture_hf([{"code": 1000, "data": {}}])
+    try:
+        c = _status_client(fake)
+        c.vehicle_status_resp(FAKE_VIN)
+    finally:
+        zc._hf_request = orig
+    assert len(seen) == 1, seen
+    assert seen[0]["query"] == "userId=mock-uid&latest=&target=", seen[0]
+    assert seen[0]["path"].endswith(FAKE_VIN)
+
+
+def test_an_explicit_user_id_still_carries_the_flags():
+    orig = zc._hf_request
+    seen, fake = _capture_hf([{"code": 1000, "data": {}}])
+    try:
+        _status_client(fake).vehicle_status_resp(FAKE_VIN, "other-uid")
+    finally:
+        zc._hf_request = orig
+    assert seen[0]["query"] == "userId=other-uid&latest=&target="
+
+
+def test_a_gateway_that_rejects_the_flags_is_downgraded_once():
+    """One retry without them, then the flags are dropped for the session -
+    a gateway that cannot take them must not cost a poll on every cycle."""
+    orig = zc._hf_request
+    calls = {"n": 0}
+
+    def _fake(method, path, *, query="", **kw):
+        calls["n"] += 1
+        if "latest=" in query:
+            raise zc.ZeekrApiError("HF HTTP 400: bad query")
+        return {"code": 1000, "data": {"plain": True}}
+
+    try:
+        c = _status_client(_fake)
+        assert c.vehicle_status_resp(FAKE_VIN)["data"] == {"plain": True}
+        assert calls["n"] == 2, "expected the flagged attempt then the retry"
+        assert c._status_flags is False
+        # Sticky: no second probe on later reads.
+        c.vehicle_status_resp(FAKE_VIN)
+        assert calls["n"] == 3, "the downgrade did not stick"
+    finally:
+        zc._hf_request = orig
+
+
+def test_a_dead_session_does_not_get_blamed_on_the_flags():
+    """The retry has to SUCCEED before the flags are dropped. A dead HF JWT
+    fails both forms, so it raises with the flags still armed - otherwise one
+    auth blip would silently cost every later poll its fresh position, which
+    is the whole bug this is fixing."""
+    orig = zc._hf_request
+    seen, fake = _capture_hf([zc.ZeekrApiError("HF HTTP 401: token expired")])
+    try:
+        c = _status_client(fake)
+        try:
+            c.vehicle_status_resp(FAKE_VIN)
+            assert False, "expected the auth failure to propagate"
+        except zc.ZeekrApiError as e:
+            assert "401" in str(e)
+        assert c._status_flags is True, "an auth failure disarmed the flags"
+        assert len(seen) == 2, "the retry should still have been attempted"
+    finally:
+        zc._hf_request = orig
+
+
+def test_the_status_read_still_needs_an_hf_session():
+    c = zc.ZeekrClient("user@example.com", "pw", gateway="https://unused.invalid")
+    try:
+        c.vehicle_status_resp(FAKE_VIN)
+        assert False, "expected ZeekrAuthError without an HF session"
+    except zc.ZeekrAuthError:
+        pass

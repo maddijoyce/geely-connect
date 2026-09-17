@@ -39,12 +39,17 @@ class FakeCoordinator:
         self.last_update_success = True
         self.last_exception = None
         self.refresh_calls = 0
+        # Debounced, non-forcing read - what the Refresh Data follow-up uses.
+        self.request_calls = 0
 
     def async_add_listener(self, cb, *a, **k):
         return lambda: None
 
     async def async_refresh(self):
         self.refresh_calls += 1
+
+    async def async_request_refresh(self):
+        self.request_calls += 1
 
 
 class FakeHass:
@@ -318,6 +323,41 @@ def _by_uid(entities, suffix):
     return next(e for e in entities if e._attr_unique_id.endswith(suffix))
 
 
+class _Later:
+    """Stands in for button.async_call_later.
+
+    Records what was scheduled and lets a test fire it, so the Refresh Data
+    follow-up read can be driven without a real event loop. Cancelling marks
+    the entry rather than dropping it, so a test can assert a cancel happened.
+    """
+
+    def __init__(self, button):
+        self.button, self.scheduled, self._orig = button, [], button.async_call_later
+
+    def __enter__(self):
+        self.button.async_call_later = self._record
+        return self
+
+    def __exit__(self, *exc):
+        self.button.async_call_later = self._orig
+
+    def _record(self, hass, delay, cb):
+        entry = {"delay": delay, "cb": cb, "cancelled": False}
+        self.scheduled.append(entry)
+
+        def _cancel():
+            entry["cancelled"] = True
+
+        return _cancel
+
+    @property
+    def live(self):
+        return [e for e in self.scheduled if not e["cancelled"]]
+
+    def fire(self, index=-1):
+        asyncio.run(self.scheduled[index]["cb"](None))
+
+
 def test_button_setup_builds_find_car_unlock_trunk_and_refresh():
     _need_ha()
     _, got = _setup_buttons(_bundle())
@@ -377,9 +417,69 @@ def test_button_unexpected_failure_becomes_homeassistanterror():
 def test_refresh_button_polls_immediately_and_succeeds_quietly():
     _need_ha()
     coord = FakeCoordinator()
-    _, got = _setup_buttons(_bundle(coordinator=coord))
-    asyncio.run(_by_uid(got, "btn_refresh").async_press())
+    button, got = _setup_buttons(_bundle(coordinator=coord))
+    with _Later(button):
+        asyncio.run(_by_uid(got, "btn_refresh").async_press())
     assert coord.refresh_calls == 1, "press did not actually run a poll"
+
+
+def test_refresh_button_comes_back_for_the_gps_fix_it_asked_for():
+    """The press fires the PAI wake and then reads - but the car uploads its
+    fix seconds AFTER the gateway ACKs that wake, so the read in the same
+    cycle is necessarily one step behind it and a single press could never
+    move the map. One follow-up read collects the fix.
+    """
+    _need_ha()
+    coord = FakeCoordinator()
+    button, got = _setup_buttons(_bundle(coordinator=coord))
+    entity = _by_uid(got, "btn_refresh")
+    with _Later(button) as later:
+        asyncio.run(entity.async_press())
+        assert len(later.live) == 1, "no follow-up read was queued"
+        assert later.scheduled[0]["delay"] == load("const").POSITION_SETTLE_SECONDS
+        assert coord.refresh_calls == 1 and coord.request_calls == 0
+        later.fire()
+    # The follow-up is a plain read: it must not re-arm the force flag, or
+    # every press would send a second wake to the car.
+    assert coord.request_calls == 1, "follow-up did not read"
+    assert coord.refresh_calls == 1, "follow-up must not be a second forced poll"
+
+
+def test_a_second_press_replaces_the_pending_follow_up():
+    _need_ha()
+    coord = FakeCoordinator()
+    button, got = _setup_buttons(_bundle(coordinator=coord))
+    entity = _by_uid(got, "btn_refresh")
+    with _Later(button) as later:
+        asyncio.run(entity.async_press())
+        asyncio.run(entity.async_press())
+        assert len(later.scheduled) == 2 and len(later.live) == 1, later.scheduled
+        assert later.scheduled[0]["cancelled"], "the first was left to fire too"
+
+
+def test_removal_cancels_a_pending_follow_up():
+    """A reload must not leave a timer pointing at a dead coordinator."""
+    _need_ha()
+    button, got = _setup_buttons(_bundle())
+    entity = _by_uid(got, "btn_refresh")
+    with _Later(button) as later:
+        asyncio.run(entity.async_press())
+        asyncio.run(entity.async_will_remove_from_hass())
+        assert later.live == [], "timer survived removal"
+    # Idempotent: removal with nothing pending is a no-op.
+    asyncio.run(entity.async_will_remove_from_hass())
+
+
+def test_a_failed_press_queues_no_follow_up():
+    """Nothing was asked of the car, so there is nothing to come back for."""
+    _need_ha()
+    coord = FakeCoordinator()
+    coord.last_update_success = False
+    coord.last_exception = RuntimeError("DNS is down")
+    button, got = _setup_buttons(_bundle(coordinator=coord))
+    with _Later(button) as later:
+        _expect_ha_error(_by_uid(got, "btn_refresh").async_press())
+        assert later.scheduled == [], later.scheduled
 
 
 def test_refresh_button_surfaces_the_polls_exception():
@@ -633,9 +733,10 @@ def test_the_refresh_button_asks_for_the_secondary_endpoints_too():
     poll_state = {}
     bundle = _bundle()
     bundle["poll_state"] = poll_state
-    _, got = _setup_buttons(bundle)
+    button, got = _setup_buttons(bundle)
     btn = _by_uid(got, "btn_refresh")
-    asyncio.run(btn.async_press())
+    with _Later(button):
+        asyncio.run(btn.async_press())
     assert poll_state.get("force_secondary") is True
 
 
@@ -643,5 +744,6 @@ def test_the_refresh_button_survives_a_bundle_without_poll_state():
     """An entry set up by an older code path carries no poll_state; the button
     must still refresh rather than raise."""
     _need_ha()
-    _, got = _setup_buttons(_bundle())
-    asyncio.run(_by_uid(got, "btn_refresh").async_press())
+    button, got = _setup_buttons(_bundle())
+    with _Later(button):
+        asyncio.run(_by_uid(got, "btn_refresh").async_press())

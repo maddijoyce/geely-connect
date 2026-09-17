@@ -538,7 +538,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # MITM or a legitimate rotation. Never hide it at DEBUG.
                 _LOGGER.error("position refresh: TLS pin check failed: %s", e)
             except Exception as e:  # noqa: BLE001
-                _LOGGER.debug("position-refresh PAI non-fatal failure: %s", e)
+                # Non-fatal - a missed wake costs freshness, not a poll. But
+                # DEBUG was too quiet: the whole symptom of a broken wake is a
+                # map that silently stops moving while every other value stays
+                # live, and at DEBUG it left no trail at the log level anyone
+                # actually runs. Warn on the first failure of a run, then fall
+                # back to DEBUG so a flaky gateway cannot flood the log.
+                if not poll_state.get("wake_failing"):
+                    poll_state["wake_failing"] = True
+                    _LOGGER.warning(
+                        "position refresh (PAI) failed - the map will hold its "
+                        "last fix until this recovers: %s", e)
+                else:
+                    _LOGGER.debug("position-refresh PAI still failing: %s", e)
+            else:
+                if poll_state.pop("wake_failing", False):
+                    _LOGGER.info("position refresh (PAI) recovered")
 
         # Primary status - the one call we always make.
         try:

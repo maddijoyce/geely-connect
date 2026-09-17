@@ -576,6 +576,76 @@ def test_a_position_hiccup_is_a_debug_line_not_a_failed_poll():
     assert ok and coord.data is not None
 
 
+def _records(module, level):
+    """Collect log messages emitted by `module` at or above `level`."""
+    import logging
+    out = []
+
+    class _Capture(logging.Handler):
+        def emit(self, r):
+            if r.levelno >= level:
+                out.append(r.getMessage())
+
+    logger = logging.getLogger(module.__name__)
+    h = _Capture()
+    logger.addHandler(h)
+    old = logger.level
+    logger.setLevel(logging.DEBUG)
+    return out, lambda: (logger.removeHandler(h), logger.setLevel(old))
+
+
+def test_a_broken_wake_warns_once_and_then_stops_shouting():
+    """A wake that never lands is the ENTIRE symptom of a frozen map: every
+    other value stays live, so there is nothing on screen to notice. At DEBUG
+    it left no trail at the level anyone runs. Warn on the first failure of a
+    run, then drop to DEBUG so a flaky gateway cannot flood the log.
+    """
+    import logging
+    m = _mod()
+
+    def tweak(api):
+        api.position_error = ValueError("PAI busy")
+
+    msgs, done = _records(m, logging.WARNING)
+    try:
+        _, _, _, api, coord, _ = _setup(m, api_tweak=tweak)
+        api.status_results = [_snap("30", "10"), _snap("35", "20"),
+                              _snap("40", "30")]
+        for _ in range(3):
+            asyncio.run(coord.refresh())
+    finally:
+        done()
+
+    warned = [msg for msg in msgs if "position refresh (PAI) failed" in msg]
+    assert len(warned) == 1, f"expected exactly one warning, got {msgs}"
+    assert "hold its last fix" in warned[0], warned[0]
+
+
+def test_a_wake_that_starts_working_again_says_so():
+    """Without this the warning above is a one-way door: a log would show a
+    broken wake and never show it healing."""
+    import logging
+    m = _mod()
+
+    def tweak(api):
+        api.position_error = ValueError("PAI busy")
+
+    msgs, done = _records(m, logging.INFO)
+    try:
+        _, _, _, api, coord, _ = _setup(m, api_tweak=tweak)
+        api.status_results = [_snap("30", "10"), _snap("35", "20")]
+        for _ in range(2):
+            asyncio.run(coord.refresh())
+        api.position_error = None
+        api.status_results = [_snap("40", "30"), _snap("45", "40")]
+        for _ in range(2):
+            asyncio.run(coord.refresh())
+    finally:
+        done()
+
+    assert any("recovered" in msg for msg in msgs), msgs
+
+
 def test_secondary_auth_and_pin_failures_take_their_designed_paths():
     """Auth on the state fetch reauths; a pin failure is an ERROR (possible
     MITM) but the poll survives; a scheduled-charging pin failure likewise."""

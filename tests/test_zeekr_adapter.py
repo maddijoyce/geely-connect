@@ -77,10 +77,9 @@ def test_constructor_and_basic_surface():
 
     st = a.vehicle_status()
     assert st["data"]["vehicleStatus"]["basicVehicleStatus"]["powerLevel"] == 98, st
-    # Position wake is a no-op on the new platform until the PAI control write
-    # is live-verified - the coordinator fires it automatically, and an unproven
-    # auto-write to the car is deliberately withheld.
-    assert a.request_position_refresh() == {}
+    # The position wake goes out the legacy telematics route when there is no
+    # x-vin, exactly as control() does - see the dedicated test below.
+    assert a.request_position_refresh()["code"] == "1000"
     ctl = a.control("AC", [{"key": "ac", "value": "1"}])
     assert ctl["data"]["result"]["code"] == 1000, ctl
     assert a.fetch_capabilities() == []
@@ -345,14 +344,59 @@ def test_position_refresh_sends_the_pai_wake_on_the_new_platform():
     assert sent == [("PAI", "start", [{"key": "pai", "value": "1"}])], sent
 
 
-def test_position_refresh_is_a_no_op_without_a_token():
-    """A vehicle with no x-vin token is on the old platform (or unconfigured);
-    the legacy client owns its PAI, so this side must not reach the car."""
+def test_position_refresh_falls_back_to_the_legacy_pai_without_a_token():
+    """No x-vin does NOT mean no position.
+
+    This used to return {} on the theory that "the legacy client owns its
+    PAI" - but on a new-platform entry the adapter IS the api, so nothing
+    owned it and the wake was simply never sent. The car was never asked for
+    a fix, the cloud kept serving the last one, and the map froze while every
+    other value stayed live. control() has always fallen back to the legacy
+    telematics route in this exact case; the wake now does too, with the body
+    api.py sends - operation=4 included, which only the NEW gateway rejects.
+    """
     a, c = _make_adapter()   # enc_vin defaults to ""
-    called = []
-    c.control_new_resp = lambda *a_, **k: called.append(1) or {}
-    assert a.request_position_refresh() == {}
-    assert called == [], "must not send a new-platform command without a token"
+    new_route = []
+    c.control_new_resp = lambda *a_, **k: new_route.append(1) or {}
+    sent = []
+    c.control_resp = lambda vin, body: (
+        sent.append((vin, body)) or {"code": "1000", "data": {}})
+
+    assert a.request_position_refresh()["code"] == "1000"
+
+    assert new_route == [], "must not send a new-platform command without a token"
+    assert len(sent) == 1, sent
+    vin, body = sent[0]
+    assert vin == FAKE_VIN
+    assert body["serviceId"] == "PAI"
+    assert body["command"] == "start"
+    assert body["latest"] is True, "the old route wants the freshness flag"
+    assert body["serviceParameters"] == [{"key": "operation", "value": "4"},
+                                         {"key": "pai", "value": "1"}]
+    assert body["userId"] == "mock-uid"
+    assert body["timestamp"].isdigit()
+
+
+def test_position_refresh_renews_and_retries_like_any_other_call():
+    """The fallback rides _authed, so an auth-looking failure gets the same
+    one silent renewal every other call gets - not a lost wake."""
+    a, c = _make_adapter(password="pw")
+    _patch_idaas()
+    try:
+        calls = []
+
+        def _control(vin, body):
+            calls.append(body["serviceId"])
+            if len(calls) == 1:
+                raise zc.ZeekrApiError("401 token expired")
+            return {"code": "1000", "data": {}}
+
+        c.control_resp = _control
+        assert a.request_position_refresh()["code"] == "1000"
+        assert calls == ["PAI", "PAI"], calls
+        assert c.access_token == "mock-at-new", "renewal re-minted the session"
+    finally:
+        _restore_idaas()
 
 
 def test_rapid_warm_and_cool_build_the_captured_setsmarttemp_body():

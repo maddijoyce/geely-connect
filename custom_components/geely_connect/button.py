@@ -31,11 +31,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_call_later
 
 from .api import GeelyControlError, redact
 
 from .const import (
     DOMAIN,
+    POSITION_SETTLE_SECONDS,
     SERVICE_FIND_CAR,
     SERVICE_FIND_CAR_PARAMS,
     SERVICE_TAILGATE,
@@ -87,6 +89,8 @@ class GeelyRefreshButton(ButtonEntity):
         vin = bundle["vin"]
         self._attr_unique_id = f"geely_{vin}_btn_refresh"
         self._attr_name = "Refresh Data"
+        # Cancel handle for the pending follow-up read (see async_press).
+        self._cancel_resync = None
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, vin)},
             manufacturer="Geely",
@@ -114,6 +118,36 @@ class GeelyRefreshButton(ButtonEntity):
             raise HomeAssistantError(
                 f"Geely sync failed: {err}" if err else "Geely sync failed"
             )
+        # The press woke the car for a fresh GPS fix, but that fix is uploaded
+        # seconds after the gateway ACKs the wake - so the read that just
+        # finished is one step behind the wake it sent, and every press showed
+        # the position from BEFORE it. Come back once to collect the fix.
+        #
+        # The follow-up asks for nothing: the force flag was spent above, so
+        # this cannot send a second wake, and on a car that never woke it is a
+        # cheap ordinary poll. It matters most in Manual mode, where there is
+        # no later poll to carry the fix instead.
+        self._schedule_resync()
+
+    def _schedule_resync(self) -> None:
+        """Queue the follow-up read, replacing any still pending."""
+        self._cancel_pending()
+        self._cancel_resync = async_call_later(
+            self._hass, POSITION_SETTLE_SECONDS, self._async_resync)
+
+    def _cancel_pending(self) -> None:
+        if self._cancel_resync is not None:
+            self._cancel_resync()
+            self._cancel_resync = None
+
+    async def _async_resync(self, _now) -> None:
+        """Read again, now that the car has had time to upload its fix."""
+        self._cancel_resync = None
+        await self._coordinator.async_request_refresh()
+
+    async def async_will_remove_from_hass(self) -> None:
+        """A reload must not leave a timer pointing at a dead coordinator."""
+        self._cancel_pending()
 
 
 class GeelyTelematicsButton(ButtonEntity):
